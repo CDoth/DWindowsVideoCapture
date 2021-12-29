@@ -23,7 +23,7 @@ struct CamContext
 
     IBaseFilter* c_filter;
 
-    GUID subtype;
+    GUID innerSubType;
     int w;
     int h;
 //        MEDIASUBTYPE_RGB24;
@@ -55,7 +55,7 @@ CamContext::CamContext() :
     pMediaFilter(NULL),
     pStreamConf(NULL),
     pAmMediaType(NULL),
-    subtype(MEDIASUBTYPE_RGB32)
+    innerSubType(MEDIASUBTYPE_RGB32)
 {}
 
 const GUID* getMediaTypeByName(const char* name)
@@ -77,7 +77,7 @@ const GUID* getMediaTypeByName(const char* name)
     if(strcmp(name, "AYUV") == 0) return &MEDIASUBTYPE_AYUV;
     return NULL;
 }
-const char* getTypeNameByGUID(const GUID& g)
+const char* getTypeNameByGUID(const GUID &g)
 {
     if(g == MEDIASUBTYPE_RGB24) return "RGB24";
     if(g == MEDIASUBTYPE_RGB32) return "RGB32";
@@ -96,6 +96,25 @@ const char* getTypeNameByGUID(const GUID& g)
     if(g == MEDIASUBTYPE_AYUV) return "AYUV";
     return NULL;
 }
+DWVC_RAWTYPE getTypeByGUID(const GUID &g) {
+
+    if(g == MEDIASUBTYPE_RGB24) return RAWTYPE_RGB24;
+    if(g == MEDIASUBTYPE_RGB32) return RAWTYPE_RGB32;
+    if(g == MEDIASUBTYPE_RGB555) return RAWTYPE_RGB555;
+    if(g == MEDIASUBTYPE_RGB565) return RAWTYPE_RGB565;
+    if(g == MEDIASUBTYPE_YUY2) return RAWTYPE_YUY2;
+    if(g == MEDIASUBTYPE_YVYU) return RAWTYPE_YVYU;
+    if(g == MEDIASUBTYPE_YUYV) return RAWTYPE_YUYV;
+    if(g == MEDIASUBTYPE_IYUV) return RAWTYPE_IYUV;
+    if(g == MEDIASUBTYPE_UYVY) return RAWTYPE_UYVY;
+    if(g == MEDIASUBTYPE_YV12) return RAWTYPE_YV12;
+    if(g == MEDIASUBTYPE_YVU9) return RAWTYPE_YVU9;
+    if(g == MEDIASUBTYPE_Y411) return RAWTYPE_Y411;
+    if(g == MEDIASUBTYPE_Y41P) return RAWTYPE_Y41P;
+    if(g == MEDIASUBTYPE_Y211) return RAWTYPE_Y211;
+    if(g == MEDIASUBTYPE_AYUV) return RAWTYPE_AYUV;
+    return RAWTYPE_NOTYPE;
+}
 
 std::vector<CameraDescriptor*> cameras;
 CameraDescriptor *_CURRENT_CAMERA = NULL;
@@ -105,6 +124,8 @@ int setCurrentCamera(CameraDescriptor *cd)
     else return -1;
     return 0;
 }
+#define PROC_ERROR0(Error) \
+    printf("CALL: %s: %s error\n", __func__, Error);
 #define PROC_ERROR(RESULT, DESCRIPTOR_FOR_STOP, EPOINT) do{ \
     printf("CALL: %s - %s error: %d\n", __func__, EPOINT, RESULT); \
     if(DESCRIPTOR_FOR_STOP) stop_camera(DESCRIPTOR_FOR_STOP);\
@@ -138,7 +159,7 @@ int read_all_cams()
         hr = pSysDevEnum->CreateClassEnumerator(CLSID_VideoInputDeviceCategory, &pEnumCat, 0);
         if(SUCCEEDED(hr))
         {
-            if(!pEnumCat) PROC_ERROR(-1, NULL,"No device");
+            if(!pEnumCat) PROC_ERROR(-1, NULL, "No device");
             while( (hr = pEnumCat->Next(1, &pMoniker, &cFetched)) == S_OK )
             {
                 hr = pMoniker->BindToStorage(0, 0, IID_IPropertyBag, (void **)&pPropBag);
@@ -310,6 +331,9 @@ void destroyGraph(IGraphBuilder* pGraph){
 int stop_camera(CameraDescriptor* cd)
 {
     HRESULT hr;
+    if(_CURRENT_CAMERA == cd) {
+        _CURRENT_CAMERA = NULL;
+    }
     if(cd)
     {
         if( cd->context && cd->context->pControl )
@@ -382,6 +406,10 @@ int init_camera(CameraDescriptor* cd, const char *raw_fmt)
     cd->context->h 	= pVih->bmiHeader.biHeight;
 
 
+    cd->width = cd->context->w;
+    cd->height = cd->context->h;
+
+
     hr = CoCreateInstance(CLSID_SampleGrabber, NULL, CLSCTX_INPROC_SERVER ,IID_IBaseFilter, (void**)&cd->context->pGrabberFilter);
     if(FAILED(hr)) PROC_ERROR(hr, cd, "CoCreateInstance:CLSID_SampleGrabber");
     hr = cd->context->pGraph->AddFilter(cd->context->pGrabberFilter, L"Sample Grabber");
@@ -394,15 +422,17 @@ int init_camera(CameraDescriptor* cd, const char *raw_fmt)
     if(FAILED(hr)) PROC_ERROR(hr, cd, "SetBufferSamples");
 
     AM_MEDIA_TYPE mt;
-    ZeroMemory(&mt,sizeof(AM_MEDIA_TYPE));
+    ZeroMemory(&mt, sizeof(AM_MEDIA_TYPE));
     mt.majortype 	= MEDIATYPE_Video;
     mt.subtype 		= cd->context->pAmMediaType->subtype;
     mt.formattype 	= FORMAT_VideoInfo;
+
     if(raw_fmt)
     {
-        const GUID* pSubtype = getMediaTypeByName(raw_fmt);
+        const GUID *pSubtype = getMediaTypeByName(raw_fmt);
         if(pSubtype) mt.subtype 		= *pSubtype;
     }
+    cd->format = getTypeNameByGUID(mt.subtype);
 
 
     hr = cd->context->pGrabber->SetMediaType(&mt);
@@ -414,7 +444,7 @@ int init_camera(CameraDescriptor* cd, const char *raw_fmt)
 
     return S_OK;
 }
-int run_camera(CameraDescriptor* cd)
+int run_camera(CameraDescriptor *cd)
 {
     HRESULT hr;
     hr = cd->context->pCaptureGraph->RenderStream(&PIN_CATEGORY_PREVIEW, &MEDIATYPE_Video, cd->context->c_filter,
@@ -441,15 +471,14 @@ int run_camera(CameraDescriptor* cd)
 
     return 0;
 }
-int capture_camera(CameraDescriptor* cd, uint8_t* dest, long* size)
+int capture_camera(CameraDescriptor *cd, uint8_t *dest, long *size)
 {
     HRESULT hr = cd->context->pGrabber->GetCurrentBuffer(size, (long*)dest);
     if(FAILED(hr))
     {
         while(hr != S_OK)
         {
-//            printf("Can't grab buffer: %d\n", hr);
-            hr = cd->context->pGrabber->GetCurrentBuffer(size, (long*)dest); //-2147024882
+            hr = cd->context->pGrabber->GetCurrentBuffer(size, (long*)dest);
             Sleep(10);
         }
     }
@@ -461,5 +490,77 @@ int capture_camera(uint8_t *dst, long *size)
     if(_CURRENT_CAMERA) return capture_camera(_CURRENT_CAMERA, dst, size);
     else PROC_ERROR(-1, NULL, "No current capture device");
 }
+
+
+
+int startCamera(int index){
+    int r = 0;
+
+    //------------------------------------------------------
+    r = read_all_cams();
+    if(r < 0) PROC_ERROR(r, NULL, "read_all_cams");
+    if(cameras.empty()) PROC_ERROR(-1, NULL, "No cameras");
+    //------------------------------------------------------
+    CameraDescriptor *d = get_camera(index);
+    if(d == NULL) PROC_ERROR(r, d, "get_camera");
+    //------------------------------------------------------
+    r = init_camera(d);
+    if(r < 0) PROC_ERROR(r, d, "init_camera");
+    //------------------------------------------------------
+    r = run_camera(d);
+    if(r < 0) PROC_ERROR(r, d, "run_camera");
+    //------------------------------------------------------
+    r = setCurrentCamera(d);
+    if(r < 0) PROC_ERROR(r, d, "setCurrentCamera");
+
+    return r;
+}
+uint8_t *getCameraBuffer(int width, int height, long *bufferSize, CameraDescriptor *d){
+    uint8_t *buffer = nullptr;
+    int r = 0;
+    long bs = 0;
+    if(width <= 0 || height <= 0) {
+        PROC_ERROR0("Wrong input args (width or height)");
+        goto fail;
+    }
+    d = d ? d :_CURRENT_CAMERA;
+    if(d == NULL) {
+        PROC_ERROR0("Bad pointer to CameraDescriptor");
+        goto fail;
+    }
+    bs = width * height * 3;
+    if( (buffer = (uint8_t*)malloc(bs)) == NULL ) {
+        PROC_ERROR0("Can't alloc mem for buffer");
+        goto fail;
+    }
+    memset(buffer, 0, bs);
+    if( (r = capture_camera(buffer, &bs)) < 0) {
+        PROC_ERROR0("First capturing fail");
+        goto fail;
+    }
+
+    if(bufferSize)
+        *bufferSize = bs;
+    return buffer;
+fail:
+    if(buffer)
+        free(buffer);
+    if(bufferSize) *bufferSize = 0;
+    return NULL;
+}
 #undef PROC_ERROR
 
+CameraDescriptor *getCurrentCamera()
+{
+    return _CURRENT_CAMERA;
+}
+const char *getCameraRawTypeName(CameraDescriptor *d) {
+    d = d ? d : _CURRENT_CAMERA;
+    if(d == NULL) return NULL;
+    return getTypeNameByGUID(d->context->pAmMediaType->subtype);
+}
+DWVC_RAWTYPE getCameraRawType(CameraDescriptor *d) {
+    d = d ? d : _CURRENT_CAMERA;
+    if(d == NULL) return RAWTYPE_NOTYPE;
+    return getTypeByGUID(d->context->pAmMediaType->subtype);
+}
